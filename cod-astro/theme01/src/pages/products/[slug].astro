@@ -1,0 +1,103 @@
+---
+// ── CUSTOMIZE HERE ────────────────────────────────────────────────────────────
+// Product detail page: image gallery, product info, order form.
+// To restyle the form, edit src/components/OrderForm.astro.
+// To restyle the gallery or product info, edit this file below the fence.
+// ─────────────────────────────────────────────────────────────────────────────
+import StoreLayout from "@/theme/layouts/StoreLayout.astro";
+import ProductDetailContent from "@/theme/components/product/ProductDetailContent.astro";
+import { getStoreContext } from "@/theme/config/store";
+import { actions } from "astro:actions";
+import { isInputError } from "astro:actions";
+
+const { slug } = Astro.params;
+
+// ── STREAMING OPTIMIZATION ──
+// Store context is fetched first (needed for layout)
+// Product data is fetched inside ProductDetailContent component
+// This allows layout/head/navigation to render immediately while product streams in
+const { config, content, isRTL } = await getStoreContext();
+
+// Action result (must be checked before rendering)
+const result = Astro.getActionResult(actions.placeOrder);
+// If order succeeded, pass data to client — the inline script below posts the
+// abandonment-conversion signal (bounded keepalive fetch) then redirects to
+// /thank-you. This avoids losing the conversion signal on a hard server
+// redirect.
+const orderSuccess = result?.data?.orderNumber
+  ? {
+      orderNumber: result.data.orderNumber,
+      total: result.data.total,
+      orderId: result.data.orderId ?? "",
+    }
+  : null;
+const fieldErrors  = isInputError(result?.error) ? result.error.fields : {};
+const serverError  = result?.error && !isInputError(result.error) ? result.error.message : null;
+---
+
+<StoreLayout
+  config={config}
+  content={content}
+  title={`${config.name}`}
+  hideMobileNav={true}
+>
+  <!-- 
+    ProductDetailContent streams in after layout renders
+    This improves perceived performance by showing navigation/header immediately
+  -->
+  <ProductDetailContent
+    slug={slug!}
+    config={config}
+    content={content}
+    isRTL={isRTL}
+    fieldErrors={fieldErrors}
+    serverError={serverError}
+  />
+</StoreLayout>
+
+<script src="../../theme/scripts/product.ts"></script>
+<script src="../../theme/scripts/otp-step.ts"></script>
+<script src="../../theme/scripts/turnstile-field.ts"></script>
+<script src="../../theme/scripts/track-abandonment.ts"></script>
+{orderSuccess && (
+  <script
+    is:inline
+    define:vars={{ orderNumber: orderSuccess.orderNumber, total: orderSuccess.total, orderId: orderSuccess.orderId }}
+  >
+    (async () => {
+      // Mark the abandoned-checkout session as converted (fire-and-forget).
+      // Posts directly — the deferred tracking module may not have defined
+      // its global yet when this inline script runs. Bounded wait so a
+      // stalled network can never delay the thank-you page by more than 2.5s.
+      try {
+        var sessionId = sessionStorage.getItem("cod_session_id");
+        if (sessionId) {
+          await Promise.race([
+            fetch("/api/abandoned/convert", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                sessionId: sessionId,
+                orderId: orderId,
+                orderNumber: orderNumber,
+              }),
+              keepalive: true,
+            }).catch(function () {}),
+            new Promise(function (resolve) { setTimeout(resolve, 2500); }),
+          ]);
+          sessionStorage.removeItem("cod_session_id");
+        }
+      } catch (e) {
+        // Non-critical — conversion tracking must never block the redirect
+      }
+      window.location.replace(
+        "/thank-you?order=" +
+          encodeURIComponent(orderNumber) +
+          "&total=" +
+          total +
+          "&oid=" +
+          encodeURIComponent(orderId)
+      );
+    })();
+  </script>
+)}
